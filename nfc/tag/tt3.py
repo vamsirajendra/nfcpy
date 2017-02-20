@@ -2,7 +2,7 @@
 # -----------------------------------------------------------------------------
 # Copyright 2009, 2017 Stephen Tiedemann <stephen.tiedemann@gmail.com>
 #
-# Licensed under the EUPL, Version 1.1 or - as soon they 
+# Licensed under the EUPL, Version 1.1 or - as soon they
 # will be approved by the European Commission - subsequent
 # versions of the EUPL (the "Licence");
 # You may not use this work except in compliance with the
@@ -19,23 +19,20 @@
 # See the Licence for the specific language governing
 # permissions and limitations under the Licence.
 # -----------------------------------------------------------------------------
+import time
+import nfc.tag
+import nfc.clf
+
+from binascii import hexlify
+from struct import pack, unpack
 
 import logging
 log = logging.getLogger(__name__)
 
-import sys, time
-from binascii import hexlify
-if sys.hexversion >= 0x020704F0:
-    from struct import pack, unpack
-else: # for Debian Wheezy (and thus Raspbian)
-    from struct import pack, unpack as _unpack
-    unpack = lambda fmt, string: _unpack(fmt, buffer(string))
-
-import nfc.tag
-import nfc.clf
 
 RSP_LENGTH_ERROR, RSP_CODE_ERROR, TAG_IDM_ERROR, DATA_SIZE_ERROR = range(1, 5)
-        
+
+
 class Type3TagCommandError(nfc.tag.TagCommandError):
     errno_str = {
         RSP_LENGTH_ERROR: "invalid response length",
@@ -50,7 +47,8 @@ class Type3TagCommandError(nfc.tag.TagCommandError):
         0x08B1: "authentication required to read (fourth block in list)",
         0x02B2: "verification failure for write with mac operation",
     }
-    
+
+
 class ServiceCode:
     """A service code provides access to a group of data blocks located on
     the card file system. A service code is a 16-bit structure
@@ -93,18 +91,19 @@ class ServiceCode:
             int(self), self.number, attribute_string)
 
     def __int__(self):
-        return self.number<<6 | self.attribute
+        return self.number << 6 | self.attribute
 
     def pack(self):
         """Pack the service code for transmission. Returns a 2 byte string."""
         sn, sa = self.number, self.attribute
-        return pack("<H", (sn & 0x3ff)<<6 | (sa & 0x3f))
+        return pack("<H", (sn & 0x3ff) << 6 | (sa & 0x3f))
 
     @classmethod
     def unpack(cls, s):
         """Unpack and return a ServiceCode from a byte string."""
         v = unpack("<H", s[0:2])[0]
         return cls(v >> 6, v & 0x3f)
+
 
 class BlockCode:
     """A block code indicates a data block within a service. A block code
@@ -129,9 +128,10 @@ class BlockCode:
     def pack(self):
         """Pack the block code for transmission. Returns a 2-3 byte string."""
         bn, am, sx = self.number, self.access, self.service
-        return chr(bool(bn < 256)<<7 | (am & 0x7)<<4 | (sx & 0xf)) + \
+        return chr(bool(bn < 256) << 7 | (am & 0x7) << 4 | (sx & 0xf)) + \
             (chr(bn) if bn < 256 else pack("<H", bn))
-        
+
+
 class Type3Tag(nfc.tag.Tag):
     """Implementation of the NFC Forum Type 3 Tag specification.
 
@@ -148,25 +148,28 @@ class Type3Tag(nfc.tag.Tag):
     class NDEF(nfc.tag.Tag.NDEF):
         # Type 3 Tag specific implementation of the NDEF access type
         # class that is returned by the Tag.ndef attribute.
-        
+
         def _read_attribute_data(self):
-            try: data = self._tag.read_from_ndef_service(0)
-            except Type3TagCommandError: return None
-            checksum = unpack(">H", data[14:16])[0]
-            if sum(data[0:14]) == checksum:
-                ver, nbr, nbw, nmaxb = unpack(">BBBH", data[0:5])
-                writef, rwflag = unpack(">BB", data[9:11])
-                length = unpack(">I", "\x00" + data[11:14])[0]
-                self._capacity = nmaxb * 16
-                self._writeable = rwflag != 0 and nbw > 0
-                self._readable = writef == 0 and nbr > 0
-                attributes = {
-                    'ver': ver, 'nbr': nbr, 'nbw': nbw, 'nmaxb': nmaxb,
-                    'writef': writef, 'rwflag': rwflag, 'ln': length}
-                log.debug("got ndef attributes {0}".format(attributes))
-                return attributes
-            else:
+            try:
+                data = self._tag.read_from_ndef_service(0)
+            except Type3TagCommandError:
+                return None
+
+            if sum(data[0:14]) != unpack(">H", data[14:16])[0]:
                 log.debug("ndef attribute data checksum error")
+                return None
+
+            ver, nbr, nbw, nmaxb = unpack(">BBBH", data[0:5])
+            writef, rwflag = unpack(">BB", data[9:11])
+            length = unpack(">I", "\x00" + data[11:14])[0]
+            self._capacity = nmaxb * 16
+            self._writeable = rwflag != 0 and nbw > 0
+            self._readable = writef == 0 and nbr > 0
+            attributes = {
+                'ver': ver, 'nbr': nbr, 'nbw': nbw, 'nmaxb': nmaxb,
+                'writef': writef, 'rwflag': rwflag, 'ln': length}
+            log.debug("got ndef attributes {0}".format(attributes))
+            return attributes
 
         def _write_attribute_data(self, attributes):
             log.debug("set ndef attributes {0}".format(attributes))
@@ -183,9 +186,11 @@ class Type3Tag(nfc.tag.Tag):
 
         def _read_ndef_data(self):
             if self.tag.sys != 0x12FC:
-                try: self.tag.idm, self.tag.pmm = self._tag.polling(0x12FC)
-                except Type3TagCommandError: return None
-                else: self.tag.sys = 0x12FC
+                try:
+                    self.tag.idm, self.tag.pmm = self._tag.polling(0x12FC)
+                    self.tag.sys = 0x12FC
+                except Type3TagCommandError:
+                    return None
 
             attributes = self._read_attribute_data()
             if attributes is None:
@@ -194,20 +199,22 @@ class Type3Tag(nfc.tag.Tag):
             if attributes['ver'] >> 4 != 1:
                 log.debug("unsupported ndef mapping major version")
                 return None
-            
+
             last_block_number = 1 + (attributes['ln'] + 15) // 16
             data = bytearray()
-            
+
             for i in range(1, last_block_number, attributes['nbr']):
                 last_block = min(i + attributes['nbr'], last_block_number)
                 block_list = range(i, last_block)
-                try: data += self.tag.read_from_ndef_service(*block_list)
-                except Type3TagCommandError: return None
+                try:
+                    data += self.tag.read_from_ndef_service(*block_list)
+                except Type3TagCommandError:
+                    return None
 
             data = data[0:attributes['ln']]
             log.debug("got {0} byte ndef data {1}{2}".format(
-                len(data), hexlify(data[0:32]), ('','...')[len(data)>32]))
-            
+                len(data), hexlify(data[0:32]), ('', '...')[len(data) > 32]))
+
             return data
 
         def _write_ndef_data(self, data):
@@ -216,11 +223,11 @@ class Type3Tag(nfc.tag.Tag):
             self._write_attribute_data(attributes)
 
             log.debug("set {0} byte ndef data {1}{2}".format(
-                len(data), hexlify(data[0:32]), ('','...')[len(data)>32]))
-            
+                len(data), hexlify(data[0:32]), ('', '...')[len(data) > 32]))
+
             last_block_number = 1 + (len(data) + 15) // 16
-            attributes['ln'] = len(data) # because we may pad zeros
-            data = data + bytearray(-len(data) % 16) # adjust to block size
+            attributes['ln'] = len(data)  # because we may need to pad zeros
+            data = data + bytearray(-len(data) % 16)  # adjust to block size
 
             for i in range(1, last_block_number, attributes['nbw']):
                 last_block = min(i + attributes['nbw'], last_block_number)
@@ -239,7 +246,6 @@ class Type3Tag(nfc.tag.Tag):
         self.sys = 0xFFFF
         if len(target.sensf_res) > 17:
             self.sys = unpack(">H", target.sensf_res[17:19])[0]
-        self._nbr, self._nbw = (1, 1)
         self._nfcid = bytearray(self.idm)
 
     def __str__(self):
@@ -271,8 +277,9 @@ class Type3Tag(nfc.tag.Tag):
         if self.sys == 0x12FC:
             ndef_read_service = ServiceCode(0, 0b01011)
             return self.dump_service(ndef_read_service)
-        else: return ["This is not an NFC Forum Tag."]
-        
+        else:
+            return ["This is not an NFC Forum Tag."]
+
     def dump_service(self, sc):
         """Read all data blocks of a given service.
 
@@ -284,34 +291,45 @@ class Type3Tag(nfc.tag.Tag):
         output.
 
         """
-        ispchr = lambda x: x >= 32 and x <= 126
-        oprint = lambda o: ' '.join(['%02x' % x for x in o])
-        cprint = lambda o: ''.join([chr(x) if ispchr(x) else '.' for x in o])
-        lprint = lambda fmt, d, i: fmt.format(i, oprint(d), cprint(d))
-        
+        def lprint(fmt, data, index):
+            ispchr = lambda x: x >= 32 and x <= 126  # noqa: E731
+
+            def print_bytes(octets):
+                return ' '.join(['%02x' % x for x in octets])
+
+            def print_chars(octets):
+                return ''.join([chr(x) if ispchr(x) else '.' for x in octets])
+
+            return fmt.format(index, print_bytes(data), print_chars(data))
+
         data_line_fmt = "{0:04X}: {1} |{2}|"
         same_line_fmt = "{0:<4s}  {1} |{2}|"
-        
+
         lines = list()
-        last_data = None; same_data = 0
+        last_data = None
+        same_data = 0
 
         for i in xrange(0x10000):
-            try: this_data = self.read_without_encryption([sc], [BlockCode(i)])
-            except Type3TagCommandError: break
-            
+            try:
+                this_data = self.read_without_encryption([sc], [BlockCode(i)])
+            except Type3TagCommandError:
+                i = i - 1
+                break
+
             if this_data == last_data:
                 same_data += 1
             else:
                 if same_data > 1:
                     lines.append(lprint(same_line_fmt, last_data, "*"))
                 lines.append(lprint(data_line_fmt, this_data, i))
-                last_data = this_data; same_data = 0
+                last_data = this_data
+                same_data = 0
 
         if same_data > 1:
             lines.append(lprint(same_line_fmt, last_data, "*"))
         if same_data > 0:
             lines.append(lprint(data_line_fmt, this_data, i))
-        
+
         return lines
 
     def format(self, version=None, wipe=None):
@@ -337,18 +355,18 @@ class Type3Tag(nfc.tag.Tag):
 
         """
         return super(Type3Tag, self).format(version, wipe)
-        
+
     def _format(self, version, wipe):
         assert version is None or type(version) is int
         assert wipe is None or type(wipe) is int
-        
+
         if self.sys != 0x12FC:
             log.warning("not an ndef tag and can not be made compatible")
             return False
-        if version and version != 0x10:
-            log.warning("type 3 tag ndef mapping version can only be 0x10")
+        if version and version >> 4 != 1:
+            log.warning("Type 3 Tag NDEF mapping major version must be 1")
             return False
-        
+
         # To determine the total number of data blocks we start with
         # the assumption that it must be between 0 and 2**16, then try
         # reading in the middle and adjust the range depending on
@@ -358,34 +376,40 @@ class Type3Tag(nfc.tag.Tag):
         nmaxb = [0, 0x10000]
         while nmaxb[1] - nmaxb[0] > 1:
             block = nmaxb[0] + (nmaxb[1] - nmaxb[0]) / 2 - 1
-            try: self.read_from_ndef_service(block)
-            except Type3TagCommandError: nmaxb[1] = block + 1
-            else: nmaxb[0] = block + 1
-        nmaxb = nmaxb[0] - 1 # subtract attribute block
+            try:
+                self.read_from_ndef_service(block)
+            except Type3TagCommandError:
+                nmaxb[1] = block + 1
+            else:
+                nmaxb[0] = block + 1
+
+        nmaxb = nmaxb[0] - 1  # subtract attribute block
+        if nmaxb < 0:
+            log.warning("this tag does not have any usable data blocks")
+            return False
 
         # To get the number of blocks that can be read in one command
         # we just try to read with an increasing number of blocks.
-        for i in range(nmaxb + 1):
-            try: self.read_from_ndef_service(*range(0, i+1))
-            except Type3TagCommandError: break
-        else: i = i + 1
-        nbr = i
+        for nbr in range(12):
+            try:
+                self.read_from_ndef_service(*((nbr+1)*[0]))
+            except Type3TagCommandError:
+                break
 
         # To get the number of blocks that can be written in one
         # command we do essentially the same as for nbr, just that to
         # preserve existing data we first read and then write it back.
-        data = bytearray()
-        for i in range(nbr):
-            data += self.read_from_ndef_service(i)
-            try: self.write_to_ndef_service(data, *range(0, i+1))
-            except Type3TagCommandError: break
-        else: i = i + 1
-        nbw = i
+        data = self.read_from_ndef_service(0)
+        for nbw in range(12):
+            try:
+                self.write_to_ndef_service((nbw+1)*data, *((nbw+1)*[0]))
+            except Type3TagCommandError:
+                break
 
         # We now have all information needed to create and write the
         # new attribute data to block number 0.
         attribute_data = bytearray(16)
-        attribute_data[0:5] = pack(">BBBH", 0x10, nbr, nbw, nmaxb)
+        attribute_data[0:5] = pack(">BBBH", version, nbr, nbw, nmaxb)
         attribute_data[10] = 0x01 if nbw > 0 else 0x00
         attribute_data[14:16] = pack(">H", sum(attribute_data[0:14]))
         log.debug("set ndef attributes {}".format(hexlify(attribute_data)))
@@ -395,8 +419,9 @@ class Type3Tag(nfc.tag.Tag):
         # 8-bit integer provided. This could take a while.
         if wipe is not None:
             data = bytearray(chr(wipe) * 16)
-            for block in xrange(1, nmaxb + 1):
-                self.write_to_ndef_service(data, block)
+            while nmaxb > 0:
+                self.write_to_ndef_service(data, nmaxb)
+                nmaxb = nmaxb - 1
 
         return True
 
@@ -440,16 +465,16 @@ class Type3Tag(nfc.tag.Tag):
         :meth:`polling` returns either the tuple (IDm, PMm) or the
         tuple (IDm, PMm, *additional information*) depending on the
         response lengt, all as bytearrays.
-        
+
         Command execution errors raise :exc:`~nfc.tag.TagCommandError`.
 
         """
-        
+
         log.debug("polling for system 0x{0:04x}".format(system_code))
-        if not time_slots in (0, 1, 3, 7, 15):
+        if time_slots not in (0, 1, 3, 7, 15):
             log.debug("invalid number of time slots: {0}".format(time_slots))
             raise ValueError("invalid number of time slots")
-        if not request_code in (0, 1, 2):
+        if request_code not in (0, 1, 2):
             log.debug("invalid request code value: {0}".format(request_code))
             raise ValueError("invalid request code for polling")
 
@@ -459,7 +484,7 @@ class Type3Tag(nfc.tag.Tag):
         if len(data) != (16 if request_code == 0 else 18):
             log.debug("unexpected polling response length")
             raise Type3TagCommandError(DATA_SIZE_ERROR)
-            
+
         return (data[0:8], data[8:16]) if len(data) == 16 else \
             (data[0:8], data[8:16], data[16:18])
 
@@ -492,22 +517,22 @@ class Type3Tag(nfc.tag.Tag):
                     print("the tag returned an error status")
                 else:
                     print("command failed with some other error")
-        
+
         Command execution errors raise :exc:`~nfc.tag.TagCommandError`.
 
         """
-        a, b, e = self.pmm[5] & 7, self.pmm[5]>>3 & 7, self.pmm[5]>>6
+        a, b, e = self.pmm[5] & 7, self.pmm[5] >> 3 & 7, self.pmm[5] >> 6
         timeout = 302.1E-6 * ((b + 1) * len(block_list) + a + 1) * 4**e
-        
+
         data = (chr(len(service_list))
                 + ''.join([sc.pack() for sc in service_list])
                 + chr(len(block_list))
                 + ''.join([bc.pack() for bc in block_list]))
-        
+
         log.debug("read w/o encryption service/block list: {0} / {1}".format(
             ' '.join([hexlify(sc.pack()) for sc in service_list]),
             ' '.join([hexlify(bc.pack()) for bc in block_list])))
-        
+
         data = self.send_cmd_recv_rsp(0x06, data, timeout)
 
         if len(data) != 1 + len(block_list) * 16:
@@ -536,7 +561,7 @@ class Type3Tag(nfc.tag.Tag):
             sc_list = [ServiceCode(0, 0b001011)]
             bc_list = [BlockCode(n) for n in blocks]
             return self.read_without_encryption(sc_list, bc_list)
-        
+
     def write_without_encryption(self, service_list, block_list, data):
         """Write data blocks to unencrypted services.
 
@@ -573,23 +598,23 @@ class Type3Tag(nfc.tag.Tag):
                     print("the tag returned an error status")
                 else:
                     print("command failed with some other error")
-        
+
         Command execution errors raise :exc:`~nfc.tag.TagCommandError`.
 
         """
-        a, b, e = self.pmm[6] & 7, self.pmm[6]>>3 & 7, self.pmm[6]>>6
+        a, b, e = self.pmm[6] & 7, self.pmm[6] >> 3 & 7, self.pmm[6] >> 6
         timeout = 302.1E-6 * ((b + 1) * len(block_list) + a + 1) * 4**e
-        
+
         data = (chr(len(service_list))
                 + ''.join([sc.pack() for sc in service_list])
                 + chr(len(block_list))
                 + ''.join([bc.pack() for bc in block_list])
                 + data)
-        
+
         log.debug("write w/o encryption service/block list: {0} / {1}".format(
             ' '.join([hexlify(sc.pack()) for sc in service_list]),
             ' '.join([hexlify(bc.pack()) for bc in block_list])))
-        
+
         self.send_cmd_recv_rsp(0x08, data, timeout)
 
     def write_to_ndef_service(self, data, *blocks):
@@ -626,7 +651,7 @@ class Type3Tag(nfc.tag.Tag):
         seconds for a response, verifies that the response is
         correctly formatted and, if *check_status* is :const:`True`,
         that the status flags do not indicate an error.
-        
+
         All errors raise a :exc:`~nfc.tag.TagCommandError`
         exception. Errors from response status flags produce an
         :attr:`~nfc.tag.TagCommandError.errno` that is greater than
@@ -653,7 +678,7 @@ class Type3Tag(nfc.tag.Tag):
                 raise Type3TagCommandError(nfc.tag.RECEIVE_ERROR)
             if type(error) is nfc.clf.ProtocolError:
                 raise Type3TagCommandError(nfc.tag.PROTOCOL_ERROR)
-            
+
         if rsp[0] != len(rsp):
             log.debug("incorrect response length {0:02x}".format(rsp[0]))
             raise Type3TagCommandError(RSP_LENGTH_ERROR)
@@ -678,7 +703,7 @@ class Type3Tag(nfc.tag.Tag):
             rsp[0], rsp[1], hexlify(rsp[2:10]), hexlify(rsp[10:12]),
             hexlify(rsp[12:]), elapsed=time.time()-started))
         return rsp[12:]
-        
+
 
 class Type3TagEmulation(nfc.tag.TagEmulation):
     """Framework for Type 3 Tag emulation.
@@ -729,7 +754,8 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
                 return bytearray([10 + len(rsp), 0x0D]) + self.idm + rsp
 
     def send_response(self, rsp, timeout):
-        if rsp: log.debug("rsp: " + hexlify(rsp))
+        if rsp:
+            log.debug("rsp: " + hexlify(rsp))
         return self.clf.exchange(rsp, timeout)
 
     def polling(self, cmd_data):
@@ -738,19 +764,19 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
         else:
             rsp = self.idm + self.pmm
         return rsp
-    
+
     def request_response(self, cmd_data):
         return bytearray([0])
-    
+
     def read_without_encryption(self, cmd_data):
         service_list = cmd_data.pop(0) * [[None, None]]
         for i in range(len(service_list)):
             service_code = cmd_data[1] << 8 | cmd_data[0]
-            if not service_code in self.services.keys():
+            if service_code not in self.services.keys():
                 return bytearray([0xFF, 0xA1])
             service_list[i] = [service_code, 0]
             del cmd_data[0:2]
-        
+
         service_block_list = cmd_data.pop(0) * [None]
         if len(service_block_list) > 15:
             return bytearray([0xFF, 0xA2])
@@ -760,7 +786,7 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
                 service_code = service_list_item[0]
                 service_list_item[1] += 1
             except IndexError:
-                return bytearray([1<<(i%8), 0xA3])
+                return bytearray([1 << (i % 8), 0xA3])
             if cmd_data[0] >= 128:
                 block_number = cmd_data[1]
                 del cmd_data[0:2]
@@ -773,7 +799,7 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
         for service_block_list_item in service_block_list:
             service_code = service_block_list_item[0]
             service_block_list_item[2] = service_block_count[service_code]
-            
+
         block_data = bytearray()
         for i, service_block_list_item in enumerate(service_block_list):
             service_code, block_number, block_count = service_block_list_item
@@ -784,20 +810,20 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
             read_func, write_func = self.services[service_code]
             one_block_data = read_func(block_number, rb, re)
             if one_block_data is None:
-                return bytearray([1<<(i%8), 0xA2, 0])
+                return bytearray([1 << (i % 8), 0xA2, 0])
             block_data.extend(one_block_data)
-            
+
         return bytearray([0, 0, len(block_data)/16]) + block_data
 
     def write_without_encryption(self, cmd_data):
         service_list = cmd_data.pop(0) * [[None, None]]
         for i in range(len(service_list)):
             service_code = cmd_data[1] << 8 | cmd_data[0]
-            if not service_code in self.services.keys():
+            if service_code not in self.services.keys():
                 return bytearray([255, 0xA1])
             service_list[i] = [service_code, 0]
             del cmd_data[0:2]
-            
+
         service_block_list = cmd_data.pop(0) * [None]
         for i in range(len(service_block_list)):
             try:
@@ -805,7 +831,7 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
                 service_code = service_list_item[0]
                 service_list_item[1] += 1
             except IndexError:
-                return bytearray([1<<(i%8), 0xA3])
+                return bytearray([1 << (i % 8), 0xA3])
             if cmd_data[0] >= 128:
                 block_number = cmd_data[1]
                 del cmd_data[0:2]
@@ -818,11 +844,11 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
         for service_block_list_item in service_block_list:
             service_code = service_block_list_item[0]
             service_block_list_item[2] = service_block_count[service_code]
-            
+
         block_data = cmd_data[0:]
         if len(block_data) % 16 != 0:
             return bytearray([255, 0xA2])
-            
+
         for i, service_block_list_item in enumerate(service_block_list):
             service_code, block_number, block_count = service_block_list_item
             # wb (write begin) and we (write end) mark an atomic write
@@ -831,16 +857,16 @@ class Type3TagEmulation(nfc.tag.TagEmulation):
             we = bool(service_block_count[service_code] == 0)
             read_func, write_func = self.services[service_code]
             if not write_func(block_number, block_data[i*16:(i+1)*16], wb, we):
-                return bytearray([1<<(i%8), 0xA2, 0])
+                return bytearray([1 << (i % 8), 0xA2, 0])
 
         return bytearray([0, 0])
 
     def request_system_code(self, cmd_data):
         return '\x01' + self.sys
 
+
 def activate(clf, target):
     if not target.sensf_res[1:3] == "\x01\xFE":
         import nfc.tag.tt3_sony
         tag = nfc.tag.tt3_sony.activate(clf, target)
         return tag if tag else Type3Tag(clf, target)
-
